@@ -6,7 +6,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -14,17 +13,168 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
-      - name: Build
+      - name: Criar projeto
         run: |
-          S=$(find . -name settings.gradle.kts -not -path "./.git/*" | head -1)
-          if [ -z "$S" ]; then
-            echo "settings.gradle.kts nao encontrado. Arquivos:"
-            find . -not -path "./.git/*" -type f
-            exit 1
-          fi
-          cd "$(dirname "$S")"
-          gradle assembleDebug
-      - uses: actions/upload-artifact@v4
-        with:
-          name: LiteLauncher-apk
-          path: "**/app-debug.apk"
+          mkdir -p LiteLauncher/app/src/main/java/com/lite/launcher LiteLauncher/app/src/main/res/layout
+          cd LiteLauncher
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "LiteLauncher"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.lite.launcher"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.lite.launcher"
+                  minSdk = 24; targetSdk = 34
+                  versionCode = 1; versionName = "1.0"
+              }
+          }
+          dependencies { implementation("androidx.recyclerview:recyclerview:1.3.2") }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN"/>
+                      <category android:name="android.intent.category.LAUNCHER"/>
+                  </intent>
+              </queries>
+              <application android:label="LiteLauncher" android:allowBackup="false"
+                  android:theme="@android:style/Theme.DeviceDefault.Wallpaper.NoTitleBar">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:launchMode="singleTask" android:stateNotNeeded="true"
+                      android:excludeFromRecents="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.HOME"/>
+                          <category android:name="android.intent.category.DEFAULT"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <androidx.recyclerview.widget.RecyclerView xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/grid" android:layout_width="match_parent" android:layout_height="match_parent"
+              android:paddingTop="48dp" android:paddingBottom="24dp" android:clipToPadding="false"/>
+          EOF
+          cat > app/src/main/res/layout/item_app.xml <<'EOF'
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="wrap_content"
+              android:orientation="vertical" android:gravity="center_horizontal" android:padding="10dp">
+              <ImageView android:id="@+id/icon" android:layout_width="52dp" android:layout_height="52dp"/>
+              <TextView android:id="@+id/label" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:gravity="center" android:maxLines="1"
+                  android:ellipsize="end" android:textColor="#FFFFFF" android:textSize="12sp"
+                  android:layout_marginTop="4dp"/>
+          </LinearLayout>
+          EOF
+          cat > app/src/main/java/com/lite/launcher/AppAdapter.kt <<'EOF'
+          package com.lite.launcher
+
+          import android.content.ComponentName
+          import android.graphics.drawable.Drawable
+          import android.os.Handler
+          import android.os.Looper
+          import android.util.LruCache
+          import android.view.LayoutInflater
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.ImageView
+          import android.widget.TextView
+          import androidx.recyclerview.widget.RecyclerView
+          import java.util.concurrent.Executors
+
+          class AppItem(val label: String, val cn: ComponentName, val loadIcon: () -> Drawable)
+
+          class AppAdapter(private val onClick: (AppItem) -> Unit) :
+              RecyclerView.Adapter<AppAdapter.VH>() {
+
+              private var items = emptyList<AppItem>()
+              private val cache = LruCache<String, Drawable>(150)
+              private val io = Executors.newFixedThreadPool(2)
+              private val ui = Handler(Looper.getMainLooper())
+
+              fun submit(list: List<AppItem>) { items = list; notifyDataSetChanged() }
+
+              class VH(v: View) : RecyclerView.ViewHolder(v) {
+                  val icon: ImageView = v.findViewById(R.id.icon)
+                  val label: TextView = v.findViewById(R.id.label)
+              }
+
+              override fun onCreateViewHolder(p: ViewGroup, t: Int) =
+                  VH(LayoutInflater.from(p.context).inflate(R.layout.item_app, p, false))
+
+              override fun getItemCount() = items.size
+
+              override fun onBindViewHolder(h: VH, pos: Int) {
+                  val a = items[pos]
+                  val key = a.cn.flattenToString()
+                  h.label.text = a.label
+                  h.itemView.setOnClickListener { onClick(a) }
+                  h.icon.tag = key
+                  val cached = cache.get(key)
+                  if (cached != null) { h.icon.setImageDrawable(cached); return }
+                  h.icon.setImageDrawable(null)
+                  io.execute {
+                      val d = a.loadIcon()
+                      cache.put(key, d)
+                      ui.post { if (h.icon.tag == key) h.icon.setImageDrawable(d) }
+                  }
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/lite/launcher/MainActivity.kt <<'EOF'
+          package com.lite.launcher
+
+          import android.app.Activity
+          import android.content.*
+          import android.os.Build
+          import android.os.Bundle
+          import androidx.recyclerview.widget.GridLayoutManager
+          import androidx.recyclerview.widget.RecyclerView
+          import java.util.concurrent.Executors
+
+          class MainActivity : Activity() {
+              private val bg = Executors.newSingleThreadExecutor()
+              private lateinit var adapter: AppAdapter
+
+              private val receiver = object : BroadcastReceiver() {
+                  override fun onReceive(c: Context, i: Intent) = load()
+              }
+
+              override fun onCreate(s: Bundle?) {
+                  super.onCreate(s)
+                  setContentView(R.layout.activity_main)
+                  adapter = AppAdapter { app ->
+                      startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                          .setComponent(app.cn).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                  }
+                  findViewById<RecyclerView>(R.id.grid).apply {
+                      layoutManager = GridLayoutManager(this@MainActivity, 4)
+                      adapter = this@MainActivity.adapter
+                      setHasFixedSize(true)
+                  }
+                  val f = IntentFilter().apply {
+                      addAction(Intent.ACTION_PACKAGE_ADDED)
+                      addAction(Intent.ACTION_PACKAGE_REMOVED)
+                      addAction(Intent.ACTION_PACKAGE_CHANGED)
+                      addDataScheme("package")
+                  }
+                  if (Build.VERSION.SDK_INT >= 33)
